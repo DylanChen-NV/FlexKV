@@ -138,5 +138,10 @@ class ShutdownRequest:
 
 
 @dataclass
+class ResetRequest:
+    dp_client_id: int
+
+
+@dataclass
 class CheckRunningRequest:
     dp_client_id: int
