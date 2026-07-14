@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Callable
 import multiprocessing as mp
 import copy
-from expiring_dict import ExpiringDict
+from expiringdict import ExpiringDict
 import nvtx
 import numpy as np
 
@@ -74,7 +74,7 @@ class KVTask:
         return self.status in [TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED]
 
     def shed_heavy_resources(self) -> None:
-        # Drop heavy fields once the task terminates. Keeps status / return_mask / batch link 
+        # Drop heavy fields once the task terminates. Keeps status / return_mask / batch link
         # so wait() can still report the result; only when the user observes it (wait/try_wait) or cancels it.
         self.graph = None
         self.token_ids = None

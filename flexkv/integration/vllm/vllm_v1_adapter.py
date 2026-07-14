@@ -45,9 +45,37 @@ try:
         def is_empty(self) -> bool:
             return True
 
+    class _FlexKVSchedulerStats(KVConnectorStats):
+        """Scheduler-side stats.  The base KVConnectorStats leaves
+        is_empty()/aggregate()/reduce()/reset() as NotImplementedError,
+        so returning a bare KVConnectorStats crashes the engine as soon
+        as the scheduler calls is_empty().  This subclass implements them."""
+
+        _COUNT_KEYS = (
+            "num_get_requests",
+            "num_put_requests",
+            "num_failed_requests",
+        )
+
+        def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
+            for k, v in other.data.items():
+                if isinstance(v, (int, float)):
+                    self.data[k] = self.data.get(k, 0) + v
+            return self
+
+        def reduce(self) -> dict[str, int | float]:
+            return dict(self.data)
+
+        def reset(self):
+            self.data = {}
+
+        def is_empty(self) -> bool:
+            return not any(self.data.get(k) for k in self._COUNT_KEYS)
+
 except ImportError:
     KVConnectorStats = None  # type: ignore[misc,assignment]
     _FlexKVWorkerSentinelStats = None  # type: ignore[misc,assignment]
+    _FlexKVSchedulerStats = None  # type: ignore[misc,assignment]
 
 # KVConnectorOutput: available since v0.10.1
 try:
@@ -1100,7 +1128,7 @@ class FlexKVConnectorV1Impl:
             "get_gpu_match_ratio": stats.get_gpu_match_ratio,
             "get_flexkv_match_ratio": stats.get_flexkv_match_ratio,
         }
-        return KVConnectorStats(data=data)
+        return _FlexKVSchedulerStats(data=data)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         if self.role == KVConnectorRole.SCHEDULER:
