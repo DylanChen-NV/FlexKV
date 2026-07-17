@@ -799,23 +799,36 @@ class FlexKVWorkerConnector:
             num_kv_heads = 1
             head_size = gpu_blocks[0].shape[2]
         else:
-            assert gpu_blocks[0].ndim == 5, (
-                f"expect kv cached tensor has 5 dim but get shape={gpu_blocks[0].shape}.")
-            # Detect GPU layout from the kv dim position (which holds size 2):
-            #   vLLM <= 0.21: (kv=2, num_blocks, ...)  -> LAYERFIRST
-            #   vLLM >= 0.23: (num_blocks, kv=2, ...)  -> LAYERBLOCK
-            if gpu_blocks[0].shape[1] == 2:
+            if gpu_blocks[0].ndim == 4:
+                if not self.flexkv_config.model_config.packed_kv:
+                    raise ValueError(
+                        "received packed 4D vLLM KV cache without packed layout config: "
+                        f"shape={tuple(gpu_blocks[0].shape)}"
+                    )
                 gpu_layout_type = KVCacheLayoutType.LAYERBLOCK
                 num_blocks = gpu_blocks[0].shape[0]
-            elif gpu_blocks[0].shape[0] == 2:
-                gpu_layout_type = KVCacheLayoutType.LAYERFIRST
-                num_blocks = gpu_blocks[0].shape[1]
+                num_kv_heads = gpu_blocks[0].shape[1]
+                block_size = gpu_blocks[0].shape[2]
+                head_size = gpu_blocks[0].shape[3]
+            elif gpu_blocks[0].ndim == 5:
+                # Legacy vLLM layouts keep K/V in a dedicated dimension.
+                if gpu_blocks[0].shape[1] == 2:
+                    gpu_layout_type = KVCacheLayoutType.LAYERBLOCK
+                    num_blocks = gpu_blocks[0].shape[0]
+                elif gpu_blocks[0].shape[0] == 2:
+                    gpu_layout_type = KVCacheLayoutType.LAYERFIRST
+                    num_blocks = gpu_blocks[0].shape[1]
+                else:
+                    raise ValueError(
+                        f"cannot infer non-MLA kv layout from shape={tuple(gpu_blocks[0].shape)}")
+                block_size = gpu_blocks[0].shape[2]
+                num_kv_heads = gpu_blocks[0].shape[3]
+                head_size = gpu_blocks[0].shape[4]
             else:
                 raise ValueError(
-                    f"cannot infer non-MLA kv layout from shape={tuple(gpu_blocks[0].shape)}")
-            block_size = gpu_blocks[0].shape[2]
-            num_kv_heads = gpu_blocks[0].shape[3]
-            head_size = gpu_blocks[0].shape[4]
+                    "expect non-MLA KV cache tensor to have 4 or 5 dimensions, "
+                    f"got shape={tuple(gpu_blocks[0].shape)}"
+                )
         gpu_layout = KVCacheLayout(
             type=gpu_layout_type,
             num_layer=num_layer,
@@ -824,6 +837,7 @@ class FlexKVWorkerConnector:
             num_head=num_kv_heads,
             head_size=head_size,
             is_mla=self.flexkv_config.model_config.use_mla,
+            packed_kv=self.flexkv_config.model_config.packed_kv,
         )
 
         # Build indexer layout if indexer caches are present

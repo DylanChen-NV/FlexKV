@@ -32,7 +32,7 @@ pytest.importorskip("flexkv")
 from vllm import SamplingParams  # noqa: E402  (guarded by importorskip above)
 
 # Default matches the user's `vllm serve` command; override with FLEXKV_TEST_MODEL.
-MODEL = "/raid/model/Qwen3-8B"
+MODEL = os.getenv("FLEXKV_TEST_MODEL", "/raid/model/Qwen3-8B")
 MAX_MODEL_LEN = 8192
 
 # Prometheus counter names (vllm/v1/metrics/loggers.py).
@@ -127,7 +127,7 @@ def llm(flexkv_config):
         gpu_memory_utilization=0.5,       # matches --gpu-memory-utilization
         enable_prefix_caching=True,       # matches --enable-prefix-caching (required)
         enable_chunked_prefill=True,      # matches --enable-chunked-prefill
-        enable_sleep_mode=True,           # verl frees GPU mem between rollouts (sleep/wake)
+        enable_sleep_mode=os.getenv("FLEXKV_TEST_ENABLE_SLEEP", "1") == "1",
         disable_log_stats=False,          # required: get_metrics() asserts otherwise
         kv_transfer_config=KVTransferConfig(
             kv_connector="FlexKVConnectorV1",

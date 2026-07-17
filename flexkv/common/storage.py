@@ -32,6 +32,7 @@ class KVCacheLayout:
     num_head: int
     head_size: int
     is_mla: bool
+    packed_kv: bool = False
     _kv_shape: Optional[torch.Size] = None
 
     def __eq__(self, other: object) -> bool:
@@ -44,11 +45,12 @@ class KVCacheLayout:
                 self.num_head == other.num_head and
                 self.head_size == other.head_size and
                 self.is_mla == other.is_mla and
+                self.packed_kv == other.packed_kv and
                 self.kv_shape == other.kv_shape)
 
     @property
     def kv_dim(self) -> int:
-        return 2 if not self.is_mla else 1
+        return 1 if self.is_mla or self.packed_kv else 2
 
     @property
     def kv_shape(self) -> torch.Size:
@@ -101,6 +103,7 @@ class KVCacheLayout:
             num_head=self.num_head,
             head_size=self.head_size,
             is_mla=self.is_mla,
+            packed_kv=self.packed_kv,
         )
         return new_layout
 
@@ -115,6 +118,7 @@ class KVCacheLayout:
             num_head=self.num_head,
             head_size=self.head_size,
             is_mla=self.is_mla,
+            packed_kv=self.packed_kv,
         )
         return new_layout
 
@@ -129,6 +133,7 @@ class KVCacheLayout:
             num_head=self.num_head // num_chunks,
             head_size=self.head_size,
             is_mla=self.is_mla,
+            packed_kv=self.packed_kv,
         )
         return new_layout
 

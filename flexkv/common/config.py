@@ -28,6 +28,7 @@ class ModelConfig:
     num_kv_heads: int = 1
     head_size: int = 1
     use_mla: bool = False
+    packed_kv: bool = False
     dtype: torch.dtype = torch.bfloat16
 
     # ------------------------------------------------------------------
@@ -200,7 +201,7 @@ class ModelConfig:
     @property
     def kv_dim(self) -> int:
         """KV dimension: 1 for MLA (no head split), 2 for standard (head split)."""
-        return 1 if self.use_mla else 2
+        return 1 if self.use_mla or self.packed_kv else 2
 
     @property
     def bytes_per_token_per_layer(self) -> int:
@@ -216,6 +217,7 @@ class ModelConfig:
         return (
             f"ModelConfig(num_layers={self.num_layers}, num_kv_heads={self.num_kv_heads}"
             f", head_size={self.head_size}, use_mla={self.use_mla}"
+            f", packed_kv={self.packed_kv}"
             f", dtype={self.dtype}"
             f", tp_size={self.tp_size}, pp_size={self.pp_size}, dp_size={self.dp_size}"
             f", attn_cp_size={self.attn_cp_size}"

@@ -245,6 +245,35 @@ class FlexKVConfig:
                 "skipping the nvfp4 head_size fold. If vLLM rejects this "
                 "config, use fp8/fp8_ds_mla for MLA instead."
             )
+        if not is_mla and not _is_nvfp4_dtype_str(effective_dtype_str):
+            try:
+                from vllm.distributed.kv_transfer.kv_connector.utils import (
+                    get_current_attn_backend,
+                )
+
+                backend = get_current_attn_backend(vllm_config)
+                cache_shape = backend.get_kv_cache_shape(
+                    1,
+                    self.cache_config.tokens_per_block,
+                    vllm_config.model_config.get_num_kv_heads(
+                        vllm_config.parallel_config
+                    ),
+                    self.model_config.head_size,
+                    vllm_kv_cache_dtype,
+                )
+                if len(cache_shape) == 4:
+                    self.model_config.packed_kv = True
+                    self.model_config.head_size = cache_shape[-1]
+                    logger.info(
+                        "[FlexKV vllm] packed K/V content layout detected: "
+                        f"shape={cache_shape}"
+                    )
+            except (AttributeError, ImportError, TypeError):
+                logger.debug(
+                    "vLLM packed K/V layout detection is unavailable; "
+                    "using the legacy split K/V layout"
+                )
+
         self.model_config.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.model_config.dp_size = vllm_config.parallel_config.data_parallel_size
         self.model_config.pp_size = vllm_config.parallel_config.pipeline_parallel_size

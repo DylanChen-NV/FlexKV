@@ -326,6 +326,7 @@ class GPUCPUTransferWorker(TransferWorkerBase):  # this worker only supports non
         self.dtype = dtype
         self.is_mla = gpu_kv_layout.is_mla
         self.kv_dim = gpu_kv_layout.kv_dim
+        self.single_kv_region = self.kv_dim == 1
 
         self.num_layers = gpu_kv_layout.num_layer
 
@@ -407,7 +408,7 @@ class GPUCPUTransferWorker(TransferWorkerBase):  # this worker only supports non
             transfer_num_cta,
             transfer_type == TransferType.H2D,
             use_ce_transfer,
-            self.is_mla,
+            self.single_kv_region,
             self.gpu_block_type_,
         )
 
