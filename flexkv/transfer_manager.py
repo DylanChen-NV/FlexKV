@@ -28,7 +28,7 @@ from flexkv.common.storage import KVCacheLayout
 from flexkv.storage.storage_engine import StorageEngine
 from flexkv.transfer.transfer_engine import TransferEngine
 from flexkv.server.utils import get_zmq_socket
-from flexkv.server.request import RegisterTPClientRequest, Response
+from flexkv.server.request import RegistrationKey, RegisterTPClientRequest, Response
 
 
 class TransferManager:
@@ -43,13 +43,14 @@ class TransferManager:
         # Calculate total expected GPUs on this node across all instances
         self.expected_gpus = self.instance_num * self.model_config.gpus_per_node
 
-        self.all_gpu_layouts: Dict[int, KVCacheLayout] = {}
-        self.all_gpu_blocks: Dict[int, List[TensorSharedHandle]] = {}  # device_id -> gpu_blocks
-        self.gpu_worker_key_mapping: Dict[int, WorkerKey] = {}
+        self.all_gpu_layouts: Dict[RegistrationKey, KVCacheLayout] = {}
+        self.all_gpu_blocks: Dict[RegistrationKey, List[TensorSharedHandle]] = {}
+        self.gpu_worker_key_mapping: Dict[RegistrationKey, WorkerKey] = {}
+        self.gpu_device_id_mapping: Dict[RegistrationKey, int] = {}
 
         # Indexer GPU registration data
-        self.all_indexer_gpu_blocks: Dict[int, List[TensorSharedHandle]] = {}  # device_id -> indexer_gpu_blocks
-        self.all_indexer_gpu_layouts: Dict[int, KVCacheLayout] = {}
+        self.all_indexer_gpu_blocks: Dict[RegistrationKey, List[TensorSharedHandle]] = {}
+        self.all_indexer_gpu_layouts: Dict[RegistrationKey, KVCacheLayout] = {}
 
         self.context = zmq.Context(2)
         self.recv_from_client = get_zmq_socket(
@@ -61,27 +62,30 @@ class TransferManager:
                            f"instance_num={self.instance_num}, expected_gpus={self.expected_gpus}")
 
     def _handle_gpu_blocks_registration(self, req: RegisterTPClientRequest) -> None:
-        device_id = req.device_id
+        registration_key = req.registration_key
 
-        if device_id in self.all_gpu_blocks:
-            flexkv_logger.error(f"GPU {device_id} has already registered.")
+        if registration_key in self.all_gpu_blocks:
+            flexkv_logger.error(
+                f"GPU worker {registration_key} has already registered.")
         else:
             try:
-                self.all_gpu_blocks[device_id] = req.handles
-                self.all_gpu_layouts[device_id] = req.gpu_layout
-                self.gpu_worker_key_mapping[device_id] = WorkerKey(
+                self.all_gpu_blocks[registration_key] = req.handles
+                self.all_gpu_layouts[registration_key] = req.gpu_layout
+                self.gpu_device_id_mapping[registration_key] = req.device_id
+                self.gpu_worker_key_mapping[registration_key] = WorkerKey(
                     dp_client_id=req.dp_client_id,
                     pp_rank=req.pp_rank,
                 )
                 # Store indexer GPU data if present
                 if req.indexer_handles is not None:
-                    self.all_indexer_gpu_blocks[device_id] = req.indexer_handles
-                    self.all_indexer_gpu_layouts[device_id] = req.indexer_gpu_layout
+                    self.all_indexer_gpu_blocks[registration_key] = req.indexer_handles
+                    self.all_indexer_gpu_layouts[registration_key] = req.indexer_gpu_layout
                     flexkv_logger.info(
-                        f"GPU {device_id}: registered indexer handles "
+                        f"GPU worker {registration_key}: registered indexer handles "
                         f"({len(req.indexer_handles)} layers)")
             except Exception as e:
-                flexkv_logger.error(f"Failed to register GPU {device_id}: {e}")
+                flexkv_logger.error(
+                    f"Failed to register GPU worker {registration_key}: {e}")
 
     def _register_gpu_blocks_via_socket(self) -> None:
         try:
@@ -98,11 +102,11 @@ class TransferManager:
                     # Periodically log waiting status for debugging
                     now = time.time()
                     if now - last_log_time >= 5.0:
-                        registered_ids = sorted(self.all_gpu_blocks.keys())
+                        registered_keys = sorted(self.all_gpu_blocks.keys())
                         flexkv_logger.info(
                             f"Still waiting for GPU registrations: "
                             f"{len(self.all_gpu_blocks)}/{self.expected_gpus} registered "
-                            f"(registered_device_ids={registered_ids}, "
+                            f"(registered_keys={registered_keys}, "
                             f"port={self.gpu_register_port})")
                         last_log_time = now
                     time.sleep(0.001)
@@ -110,10 +114,12 @@ class TransferManager:
 
                 if isinstance(req, RegisterTPClientRequest):
                     flexkv_logger.info(f"Received GPU blocks registration request: {type(req)}, "
+                                       f"registration_key={req.registration_key}, "
                                        f"device_id={req.device_id}, "
                                        f"dp_client_id={req.dp_client_id}, pp_rank={req.pp_rank}")
                     self._handle_gpu_blocks_registration(req)
-                    flexkv_logger.info(f"GPU {req.device_id} registered successfully, "
+                    flexkv_logger.info(
+                                       f"GPU worker {req.registration_key} registered successfully, "
                                        f"waiting for {self.expected_gpus - len(self.all_gpu_blocks)} GPUs to register")
                 else:
                     flexkv_logger.error(f"Unrecognized RequestType in SchedulerServer: {type(req)}")
@@ -144,16 +150,17 @@ class TransferManager:
             num_layers_per_pp_stage,
         )
 
-        # Register GPU blocks with their global device IDs
-        for device_id, gpu_blocks_wrapper in self.all_gpu_blocks.items():
+        # Logical registration identity is separate from the node-local CUDA ID.
+        for registration_key, gpu_blocks_wrapper in self.all_gpu_blocks.items():
+            device_id = self.gpu_device_id_mapping[registration_key]
             # Get indexer data for this device if available
-            indexer_gpu_blocks = self.all_indexer_gpu_blocks.get(device_id)
-            indexer_gpu_layout = self.all_indexer_gpu_layouts.get(device_id)
+            indexer_gpu_blocks = self.all_indexer_gpu_blocks.get(registration_key)
+            indexer_gpu_layout = self.all_indexer_gpu_layouts.get(registration_key)
             indexer_dtype = (self.cache_config.indexer.dtype
                              if self.cache_config.indexer is not None else None)
             self.storage_engine.register_gpu_blocks(
                 gpu_blocks_wrapper,
-                self.all_gpu_layouts[device_id],
+                self.all_gpu_layouts[registration_key],
                 device_id,
                 dtype=self.model_config.dtype,
                 indexer_gpu_blocks=indexer_gpu_blocks,
@@ -163,8 +170,9 @@ class TransferManager:
 
         # Group GPU handles by WorkerKey
         grouped_gpu_handles: Dict[WorkerKey, List] = {}
-        for device_id in sorted(self.all_gpu_blocks.keys()):
-            worker_key = self.gpu_worker_key_mapping[device_id]
+        for registration_key in sorted(self.all_gpu_blocks.keys()):
+            worker_key = self.gpu_worker_key_mapping[registration_key]
+            device_id = self.gpu_device_id_mapping[registration_key]
             if worker_key not in grouped_gpu_handles:
                 grouped_gpu_handles[worker_key] = []
             grouped_gpu_handles[worker_key].append(
@@ -183,9 +191,10 @@ class TransferManager:
         indexer_gpu_handles: Optional[Dict[WorkerKey, List]] = None
         if self.storage_engine.has_storage_handle(DeviceType.CPU, is_indexer=True):
             indexer_gpu_handles = {}
-            for device_id in sorted(self.all_gpu_blocks.keys()):
+            for registration_key in sorted(self.all_gpu_blocks.keys()):
+                device_id = self.gpu_device_id_mapping[registration_key]
                 if self.storage_engine.has_storage_handle(DeviceType.GPU, device_id, is_indexer=True):
-                    worker_key = self.gpu_worker_key_mapping[device_id]
+                    worker_key = self.gpu_worker_key_mapping[registration_key]
                     if worker_key not in indexer_gpu_handles:
                         indexer_gpu_handles[worker_key] = []
                     indexer_gpu_handles[worker_key].append(

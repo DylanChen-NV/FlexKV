@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -7,6 +7,9 @@ from flexkv.common.config import ModelConfig
 from flexkv.common.memory_handle import TensorSharedHandle
 from flexkv.common.storage import KVCacheLayout
 from flexkv.common.request import KVResponseStatus
+
+
+RegistrationKey = Tuple[int, int]
 
 
 @dataclass
@@ -20,12 +23,17 @@ class RegisterDPClientRequest:
 class RegisterTPClientRequest:
     dp_client_id: int
     pp_rank: int
+    intra_client_id: int
     device_id: int
     handles: List[TensorSharedHandle]
     gpu_layout: KVCacheLayout
     # --- Indexer shadow transfer fields ---
     indexer_handles: Optional[List[TensorSharedHandle]] = None
     indexer_gpu_layout: Optional[KVCacheLayout] = None
+
+    @property
+    def registration_key(self) -> RegistrationKey:
+        return (self.dp_client_id, self.intra_client_id)
 
 
 @dataclass
