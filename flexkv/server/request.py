@@ -146,6 +146,11 @@ class ShutdownRequest:
 
 
 @dataclass
+class UnregisterDPClientRequest:
+    dp_client_id: int
+
+
+@dataclass
 class ResetRequest:
     dp_client_id: int
 
