@@ -311,6 +311,8 @@ class GPUCPUTransferWorker(TransferWorkerBase):  # this worker only supports non
                  compressor: Optional[CompressionStrategy] = None,
                  ) -> None:
         # initialize worker in a new process
+        if gpu_device_id != -1:
+            torch.cuda.set_device(gpu_device_id)
         super().__init__(worker_id, transfer_conn, finished_ops_queue, op_buffer_tensor)
         # Register CPU tensors with CUDA
         cpu_blocks = materialize_worker_tensor(cpu_blocks)
@@ -348,9 +350,6 @@ class GPUCPUTransferWorker(TransferWorkerBase):  # this worker only supports non
             self.gpu_block_type_ = 2
         else:
             raise ValueError(f"Invalid GPU block type: {len(self.gpu_blocks)}")
-        # set GPU device
-        if gpu_device_id != -1:
-            torch.cuda.set_device(gpu_device_id)
         self.transfer_stream = torch.cuda.Stream()
         self.transfer_num_cta_h2d = transfer_num_cta_h2d
         self.transfer_num_cta_d2h = transfer_num_cta_d2h
@@ -447,8 +446,10 @@ class tpGPUCPUTransferWorker(TransferWorkerBase):
                  transfer_num_cta_d2h: int = 4,
                  compressor: Optional[CompressionStrategy] = None):
 
-        super().__init__(worker_id, transfer_conn, finished_ops_queue, op_buffer_tensor)
         assert len(gpu_blocks) == tp_group_size
+        assert gpu_blocks and gpu_blocks[0]
+        torch.cuda.set_device(gpu_blocks[0][0].device)
+        super().__init__(worker_id, transfer_conn, finished_ops_queue, op_buffer_tensor)
         cpu_blocks = materialize_worker_tensor(cpu_blocks)
         # Handle tensor import for multi-process case
         imported_gpu_blocks = []
