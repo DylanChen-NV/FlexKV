@@ -58,6 +58,7 @@ class KVDPClient:
         self._task_id_range = (self.dp_client_id * 10000000, (self.dp_client_id + 1) * 10000000)
         self._task_id_counter = self._task_id_range[0]
         self._task_id_lock = Lock()
+        self._rpc_lock = Lock()
         flexkv_logger.info(f"KVDPClient Initialized! [DP Client ID]: {self.dp_client_id}")
 
     def _get_task_id(self) -> int:
@@ -211,12 +212,13 @@ class KVDPClient:
         layerwise_transfer: bool = False,
         counter_id: int = 0,
     ) -> List[int]:
-        batch_id = -1
-        if as_batch:
-            batch_id = self._get_task_id()
-        req = LaunchTaskRequest(self.dp_client_id, task_ids, slot_mappings, as_batch, batch_id, layerwise_transfer, counter_id)
-        self.send_to_server.send_pyobj(req)
-        return [batch_id] if as_batch else task_ids
+        with self._rpc_lock:
+            batch_id = -1
+            if as_batch:
+                batch_id = self._get_task_id()
+            req = LaunchTaskRequest(self.dp_client_id, task_ids, slot_mappings, as_batch, batch_id, layerwise_transfer, counter_id)
+            self.send_to_server.send_pyobj(req)
+            return [batch_id] if as_batch else task_ids
 
     def cancel_tasks(
         self,
@@ -249,8 +251,9 @@ class KVDPClient:
     ) -> Optional[Dict[int, KVResponse]]:
         req = TryWaitRequest(self.dp_client_id, try_wait_task_ids)
 
-        self.send_to_server.send_pyobj(req)
-        response: Response = self.recv_from_server.recv_pyobj()
+        with self._rpc_lock:
+            self.send_to_server.send_pyobj(req)
+            response: Response = self.recv_from_server.recv_pyobj()
         if response.status is not None:
             for k, v in response.status.items():
                 if v.status != KVResponseStatus.SUCCESS:
