@@ -861,7 +861,7 @@ class CPURemoteTransferWorker(TransferWorkerBase):
         # For multi-group layouts, get_chunk_size() is not valid.
         # CPURemoteTransferWorker uses LAYERFIRST which is single-group only,
         # but guard for safety.
-        if cpu_kv_layout.layer_groups is not None:
+        if getattr(cpu_kv_layout, "layer_groups", None) is not None:
             self.block_size = cpu_kv_layout.get_block_stride()
         else:
             self.block_size = cpu_kv_layout.get_chunk_size()
@@ -1725,7 +1725,7 @@ class PEER2CPUTransferWorker(TransferWorkerBase):
         self.num_cpu_blocks = cpu_kv_layout.num_block
         # For multi-group layouts (e.g. gemma4), get_chunk_size() is invalid;
         # use get_block_stride() which works for both single and multi-group BLOCKFIRST.
-        if cpu_kv_layout.layer_groups is not None:
+        if getattr(cpu_kv_layout, "layer_groups", None) is not None:
             self.block_size = cpu_kv_layout.get_block_stride()
         else:
             self.block_size = cpu_kv_layout.get_chunk_size()
