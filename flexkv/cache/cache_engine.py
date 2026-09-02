@@ -1417,7 +1417,7 @@ class GlobalCacheEngine:
                 fragment23_cpu_blocks = self.cpu_cache_engine.take(
                     num_required_blocks=num_extra_required_blocks,
                     protected_node=cpu_matched_result.last_node,
-                    strict=True
+                    strict=True,
                 )
             except RuntimeError:
                 self._release_swa_read_reservation(swa_reservation)
@@ -1431,6 +1431,20 @@ class GlobalCacheEngine:
                 if self._metrics_collector is not None:
                     self._metrics_collector.record_allocation_failure("global")
                 return self._empty_get_return(request_id)
+            if fragment2_num_blocks > 0:
+                self.cpu_cache_engine.trace_cpu_block_origin(
+                    fragment23_cpu_blocks[:fragment2_num_blocks],
+                    "disk_get",
+                    event="get_staging",
+                    request_id=request_id,
+                )
+            if fragment3_num_blocks > 0:
+                self.cpu_cache_engine.trace_cpu_block_origin(
+                    fragment23_cpu_blocks[-fragment3_num_blocks:],
+                    "peer_get",
+                    event="get_staging",
+                    request_id=request_id,
+                )
             fragment123_cpu_blocks = np.concatenate([fragment123_cpu_blocks, fragment23_cpu_blocks])
             # Mooncake can partially fail after match. Keep its staging blocks
             # detached until graph completion; the callback will fresh-rematch
@@ -2174,7 +2188,8 @@ class GlobalCacheEngine:
             num_required_blocks=fragment12_num_blocks,
             protected_node=(cpu_matched_result.last_ready_node
                             if defer_put_commit else cpu_matched_result.last_node),
-            strict=False
+            strict=False,
+            trace_origin="local_put",
         )
         if len(fragment12_cpu_blocks) < fragment12_num_blocks:
             self.cpu_cache_engine.recycle(fragment12_cpu_blocks)

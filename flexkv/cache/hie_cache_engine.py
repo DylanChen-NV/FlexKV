@@ -1,5 +1,7 @@
 from typing import Optional, Tuple, TYPE_CHECKING, List, Dict
 
+import os
+import threading
 import time
 import numpy as np
 import torch
@@ -11,11 +13,70 @@ from flexkv.cache.radix_remote import LocalRadixTree, DistributedRadixTree
 from flexkv.cache.redis_meta import RedisMetaChannel as _PyRedisMetaChannel
 from flexkv.cache.redis_meta import RedisMeta
 from flexkv.common.block import SequenceMeta
-from flexkv.common.debug import eviction_log_aggregator
+from flexkv.common.debug import eviction_log_aggregator, flexkv_logger
 #if TYPE_CHECKING:
 from flexkv.common.config import CacheConfig, GLOBAL_CONFIG_FROM_ENV
 from flexkv.common.transfer import DeviceType
 from flexkv.common.type import MatchResultAccel
+
+
+class _CPUBlockOriginTrace:
+    """Debug-only ownership accounting for physical CPU cache blocks."""
+
+    _ORIGINS = {
+        "untracked": 0,
+        "local_put": 1,
+        "peer_get": 2,
+        "disk_get": 3,
+    }
+
+    def __init__(self, num_total_blocks: int, enabled: bool) -> None:
+        self.enabled = enabled
+        self._lock = threading.Lock()
+        self._origin = (
+            np.zeros(num_total_blocks, dtype=np.uint8) if enabled else None
+        )
+        self._counts = np.zeros(len(self._ORIGINS), dtype=np.int64)
+        self._counts[0] = num_total_blocks if enabled else 0
+
+    def update(self, physical_blocks: np.ndarray, origin: str) -> None:
+        if not self.enabled or physical_blocks is None:
+            return
+        if torch.is_tensor(physical_blocks):
+            block_ids = physical_blocks.detach().cpu().numpy().reshape(-1)
+        else:
+            block_ids = np.asarray(physical_blocks, dtype=np.int64).reshape(-1)
+        if block_ids.size == 0:
+            return
+        code = self._ORIGINS[origin]
+        with self._lock:
+            unique_ids = np.unique(block_ids)
+            previous = self._origin[unique_ids]
+            previous_counts = np.bincount(
+                previous, minlength=len(self._ORIGINS)
+            )
+            self._counts -= previous_counts
+            self._origin[unique_ids] = code
+            self._counts[code] += unique_ids.size
+
+    def counts(self) -> Dict[str, int]:
+        if not self.enabled:
+            return {}
+        with self._lock:
+            counts = self._counts.copy()
+        return {
+            name: int(counts[code])
+            for name, code in self._ORIGINS.items()
+            if code != 0
+        }
+
+    def reset(self) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._origin.fill(0)
+            self._counts.fill(0)
+            self._counts[0] = self._origin.size
 
 
 class HierarchyLRCacheEngine:
@@ -50,6 +111,13 @@ class HierarchyLRCacheEngine:
             )
 
         self.device_type = device_type
+        self._cpu_block_origin_trace = _CPUBlockOriginTrace(
+            num_total_blocks=num_total_blocks,
+            enabled=(
+                device_type == DeviceType.CPU
+                and os.getenv("FLEXKV_CPU_POOL_TRACE", "0") == "1"
+            ),
+        )
         self._meta: Optional[RedisMeta] = meta # todo: define storage type in meta
 
 
@@ -196,6 +264,8 @@ class HierarchyLRCacheEngine:
                 f"Failed to finish reset barrier for device type: {self.device_type}"
             )
         self.mempool.reset()
+        self._cpu_block_origin_trace.reset()
+        self._trace_cpu_pool_snapshot(event="reset")
 
         if restart_remote_index and not self.remote_index.start(self.remote_ch):
             raise RuntimeError(
@@ -485,7 +555,8 @@ class HierarchyLRCacheEngine:
     def take(self,
              num_required_blocks: int,
              protected_node: Optional[CRadixNode] = None,
-             strict: bool = True) -> torch.Tensor:
+             strict: bool = True,
+             trace_origin: Optional[str] = None) -> torch.Tensor:
         # Calculate current utilization
         utilization = (self.mempool.num_total_blocks - self.mempool.num_free_blocks) / self.mempool.num_total_blocks if self.mempool.num_total_blocks > 0 else 0
 
@@ -519,6 +590,7 @@ class HierarchyLRCacheEngine:
                     target_blocks.resize_(num_evicted)
                 evicted_np = target_blocks.numpy()
                 self.mempool.recycle_blocks(evicted_np)
+                self._cpu_block_origin_trace.update(evicted_np, "untracked")
                 free_after = self.mempool.num_free_blocks
                 eviction_log_aggregator.record(
                     tier=self.device_type.name.lower(),
@@ -543,6 +615,11 @@ class HierarchyLRCacheEngine:
                 self.local_index.unlock(protected_node)
 
         if strict and num_required_blocks > self.mempool.num_free_blocks:
+            self._trace_cpu_pool_snapshot(
+                event="take_failed",
+                requested_blocks=num_required_blocks,
+                available_blocks=self.mempool.num_free_blocks,
+            )
             raise ValueError(
                 f"Not enough free blocks to take, required: {num_required_blocks}, available: {self.mempool.num_free_blocks}"
             )
@@ -550,11 +627,62 @@ class HierarchyLRCacheEngine:
         #print(f"[TAKE STATISTICS] device type: {self.device_type.name}, utilization: {utilization}, ",
         #      f"should_evict: {should_evict}, num_required_blocks: {num_required_blocks}, ",
         #      f"num_allocated_blocks: {num_allocated_blocks}, num_free_blocks: {self.mempool.num_free_blocks}")
-        return self.mempool.allocate_blocks(num_allocated_blocks)
+        allocated_blocks = self.mempool.allocate_blocks(num_allocated_blocks)
+        if trace_origin is not None:
+            self.trace_cpu_block_origin(
+                allocated_blocks,
+                trace_origin,
+                event="take",
+                requested_blocks=num_required_blocks,
+            )
+        elif self._cpu_block_origin_trace.enabled:
+            self._trace_cpu_pool_snapshot(
+                event="take_unclassified",
+                requested_blocks=num_required_blocks,
+                allocated_blocks=num_allocated_blocks,
+            )
+        return allocated_blocks
 
     def recycle(self, physical_blocks: np.ndarray) -> None:
         self.mempool.recycle_blocks(physical_blocks)
+        self._cpu_block_origin_trace.update(physical_blocks, "untracked")
+        self._trace_cpu_pool_snapshot(
+            event="recycle", recycled_blocks=len(physical_blocks)
+        )
         self._drain_unmounted_swa_slots()
+
+    def trace_cpu_block_origin(
+        self,
+        physical_blocks: np.ndarray,
+        origin: str,
+        event: str = "relabel",
+        **fields: int,
+    ) -> None:
+        self._cpu_block_origin_trace.update(physical_blocks, origin)
+        self._trace_cpu_pool_snapshot(
+            event=event,
+            origin=origin,
+            allocated_blocks=len(physical_blocks),
+            **fields,
+        )
+
+    def _trace_cpu_pool_snapshot(self, event: str, **fields) -> None:
+        if not self._cpu_block_origin_trace.enabled:
+            return
+        counts = self._cpu_block_origin_trace.counts()
+        total = int(self.mempool.num_total_blocks)
+        free = int(self.mempool.num_free_blocks)
+        classified = sum(counts.values())
+        untracked_used = max(0, total - free - classified)
+        details = " ".join(f"{key}={value}" for key, value in fields.items())
+        flexkv_logger.info(
+            "[FlexKV-CPU-POOL] "
+            f"event={event} {details} "
+            f"local_put={counts.get('local_put', 0)} "
+            f"peer_get={counts.get('peer_get', 0)} "
+            f"disk_get={counts.get('disk_get', 0)} "
+            f"untracked_used={untracked_used} free={free} total={total}"
+        )
 
     #TODO pfcs may not work now
     @classmethod
