@@ -1857,6 +1857,20 @@ class GlobalCacheEngine:
                 protected_node=cpu_matched_result.last_node,
                 strict=False
             )
+            if fragment2_num_blocks > 0:
+                self.cpu_cache_engine.trace_cpu_block_origin(
+                    allocated_cpu_blocks[:fragment2_num_blocks],
+                    "disk_get",
+                    event="get_local_staging",
+                    request_id=request_id,
+                )
+            if cpu_matched_result.matched_pos == "remote" and fragment1_num_blocks > 0:
+                self.cpu_cache_engine.trace_cpu_block_origin(
+                    allocated_cpu_blocks[-fragment1_num_blocks:],
+                    "peer_get",
+                    event="get_local_staging",
+                    request_id=request_id,
+                )
             nvtx.pop_range()
         else:
             # take(0) may still trigger proactive eviction at high utilization.
@@ -2558,7 +2572,8 @@ class GlobalCacheEngine:
         fragment12_cpu_blocks = self.cpu_cache_engine.take(
             num_required_blocks=fragment12_num_blocks,
             protected_node = cpu_matched_result.last_node,
-            strict=False
+            strict=False,
+            trace_origin="local_put",
         )
 
         if enable_ssd:
