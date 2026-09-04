@@ -3754,9 +3754,13 @@ class PEER2CPUTransferWorker(TransferWorkerBase):
             src_ptr_list = []
             dst_ptr_list = []
             data_size_list = []
+            peer_src_block_ids = []
+            local_dst_block_ids = []
             for seg in segments:
                 src_blocks = seg["src"]
                 dst_blocks = seg["dst"]
+                peer_src_block_ids.extend(src_blocks)
+                local_dst_block_ids.extend(dst_blocks)
 
                 # step2: calculate the src and dst block start ptrs
                 src_block_start_ptrs, src_data_size_per_block = (
@@ -3802,8 +3806,8 @@ class PEER2CPUTransferWorker(TransferWorkerBase):
                     "",
                     src_ptr_list,
                     dst_ptr_list,
-                    [],    # src_block_ids unused for PEERH2H (uses ptrs)
-                    [],    # dst_block_ids unused for PEERH2H (uses ptrs)
+                    peer_src_block_ids,
+                    local_dst_block_ids,
                     data_size_list,
                     data_size = sum(data_size_list)
                 )
