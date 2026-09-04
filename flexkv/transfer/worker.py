@@ -3,6 +3,7 @@ import logging
 import os
 import copy
 import signal
+import zlib
 
 import torch.multiprocessing as mp
 import threading
@@ -45,6 +46,44 @@ from flexkv.transfer.host_buffer import (
     cudaHostRegister,
     safe_cuda_host_unregister,
 )
+
+
+def _trace_cpu_block_fingerprints(
+    stage: str,
+    cpu_tensor: torch.Tensor,
+    local_block_ids: Union[torch.Tensor, np.ndarray, List[int]],
+    block_stride_in_bytes: int,
+    peer_block_ids: Optional[Union[torch.Tensor, np.ndarray, List[int]]] = None,
+) -> None:
+    """Diagnostic-only full-block fingerprints for cross-node KV tracing."""
+    if os.environ.get("FLEXKV_TRACE_BLOCK_FINGERPRINT", "0") != "1":
+        return
+
+    local_ids = np.asarray(local_block_ids, dtype=np.int64).reshape(-1)
+    if peer_block_ids is None:
+        peer_ids = np.full(local_ids.shape, -1, dtype=np.int64)
+    else:
+        peer_ids = np.asarray(peer_block_ids, dtype=np.int64).reshape(-1)
+        if peer_ids.size != local_ids.size:
+            raise ValueError(
+                f"fingerprint block-id size mismatch: local={local_ids.size}, "
+                f"peer={peer_ids.size}"
+            )
+
+    byte_view = cpu_tensor.view(torch.uint8).reshape(-1).numpy()
+    for local_id, peer_id in zip(local_ids.tolist(), peer_ids.tolist()):
+        start = local_id * block_stride_in_bytes
+        end = start + block_stride_in_bytes
+        checksum = zlib.crc32(memoryview(byte_view[start:end])) & 0xFFFFFFFF
+        flexkv_logger.info(
+            "[FlexKV-KV-FINGERPRINT] stage=%s local_block=%d "
+            "peer_block=%d bytes=%d crc32=%08x",
+            stage,
+            local_id,
+            peer_id,
+            block_stride_in_bytes,
+            checksum,
+        )
 
 
 def ensure_cuda_device(device: Union[int, torch.device, None]) -> None:
@@ -1526,6 +1565,22 @@ class tpGPUCPUTransferWorker(TransferWorkerBase):
             self._compressor.run(
                 self, src_block_ids=src_block_ids,
                 dst_block_ids=dst_block_ids, op=transfer_op)
+        if transfer_op.transfer_type == TransferType.D2H:
+            _trace_cpu_block_fingerprints(
+                "D2H_CPU",
+                self.cpu_tensor,
+                dst_block_ids,
+                self.cpu_block_stride_in_bytes,
+                peer_block_ids=src_block_ids,
+            )
+        elif transfer_op.transfer_type == TransferType.H2D:
+            _trace_cpu_block_fingerprints(
+                "H2D_CPU",
+                self.cpu_tensor,
+                src_block_ids,
+                self.cpu_block_stride_in_bytes,
+                peer_block_ids=dst_block_ids,
+            )
         return True
 
 class CPUSSDDiskTransferWorker(TransferWorkerBase):
@@ -3206,6 +3261,14 @@ class PEER2CPUTransferWorker(TransferWorkerBase):
             if not ret:
                 transfer_finished = False
                 break
+            if transfer_op.transfer_type == TransferType.PEERH2H:
+                _trace_cpu_block_fingerprints(
+                    "PEERH2H_CPU",
+                    self.cpu_blocks,
+                    task_info.dst_block_ids,
+                    self.cpu_kv_layout.get_block_stride() * self.dtype.itemsize,
+                    peer_block_ids=task_info.src_block_ids,
+                )
             transfered_size += task_info.data_size
 
         end_time = time.time()
