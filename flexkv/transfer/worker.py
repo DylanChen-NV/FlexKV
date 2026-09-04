@@ -86,6 +86,78 @@ def _trace_cpu_block_fingerprints(
         )
 
 
+def _trace_tp_gpu_cpu_fingerprints(
+    stage: str,
+    gpu_blocks: List[List[torch.Tensor]],
+    gpu_block_ids: torch.Tensor,
+    cpu_tensor: torch.Tensor,
+    cpu_block_ids: torch.Tensor,
+    cpu_block_stride_in_bytes: int,
+    cpu_tp_stride_in_bytes: int,
+    gpu_block_strides_in_bytes: List[int],
+    gpu_chunk_sizes_in_bytes: List[int],
+) -> None:
+    """Sample TP-rank GPU blocks and compare them with their CPU slices."""
+    if os.environ.get("FLEXKV_TRACE_BLOCK_FINGERPRINT", "0") != "1":
+        return
+
+    gpu_ids = np.asarray(gpu_block_ids, dtype=np.int64).reshape(-1)
+    cpu_ids = np.asarray(cpu_block_ids, dtype=np.int64).reshape(-1)
+    if gpu_ids.size != cpu_ids.size:
+        raise ValueError(
+            f"GPU/CPU fingerprint block-id size mismatch: "
+            f"gpu={gpu_ids.size}, cpu={cpu_ids.size}"
+        )
+    if not gpu_ids.size:
+        return
+
+    max_samples = int(os.environ.get("FLEXKV_TRACE_GPU_BLOCK_SAMPLES", "16"))
+    sample_count = min(max_samples, gpu_ids.size)
+    sample_indices = np.linspace(
+        0, gpu_ids.size - 1, num=sample_count, dtype=np.int64
+    )
+    cpu_bytes = cpu_tensor.view(torch.uint8).reshape(-1).numpy()
+
+    for index in np.unique(sample_indices).tolist():
+        gpu_block_id = int(gpu_ids[index])
+        cpu_block_id = int(cpu_ids[index])
+        for tp_rank, tensors in enumerate(gpu_blocks):
+            cpu_start = (
+                cpu_block_id * cpu_block_stride_in_bytes
+                + tp_rank * cpu_tp_stride_in_bytes
+            )
+            cpu_end = cpu_start + cpu_tp_stride_in_bytes
+            cpu_crc = zlib.crc32(memoryview(cpu_bytes[cpu_start:cpu_end])) & 0xFFFFFFFF
+
+            gpu_crc = 0
+            gpu_block_start = (
+                gpu_block_id * gpu_block_strides_in_bytes[tp_rank]
+            )
+            chunk_size = gpu_chunk_sizes_in_bytes[tp_rank]
+            gpu_bytes = 0
+            for tensor in tensors:
+                tensor_bytes = tensor.view(torch.uint8).reshape(-1)
+                chunk = tensor_bytes[
+                    gpu_block_start : gpu_block_start + chunk_size
+                ].detach().cpu().numpy()
+                gpu_crc = zlib.crc32(memoryview(chunk), gpu_crc)
+                gpu_bytes += chunk.nbytes
+            gpu_crc &= 0xFFFFFFFF
+            flexkv_logger.info(
+                "[FlexKV-KV-ENDPOINT] stage=%s tp_rank=%d "
+                "gpu_block=%d cpu_block=%d bytes=%d cpu_crc32=%08x "
+                "gpu_crc32=%08x match=%s",
+                stage,
+                tp_rank,
+                gpu_block_id,
+                cpu_block_id,
+                gpu_bytes,
+                cpu_crc,
+                gpu_crc,
+                cpu_crc == gpu_crc and gpu_bytes == cpu_tp_stride_in_bytes,
+            )
+
+
 def ensure_cuda_device(device: Union[int, torch.device, None]) -> None:
     """Bind this process's CUDA context before IPC import / host register / Stream.
 
@@ -1573,6 +1645,17 @@ class tpGPUCPUTransferWorker(TransferWorkerBase):
                 self.cpu_block_stride_in_bytes,
                 peer_block_ids=src_block_ids,
             )
+            _trace_tp_gpu_cpu_fingerprints(
+                "D2H_ENDPOINT",
+                self.gpu_blocks,
+                src_block_ids,
+                self.cpu_tensor,
+                dst_block_ids,
+                self.cpu_block_stride_in_bytes,
+                self.cpu_tp_stride_in_bytes,
+                self.gpu_block_strides_in_bytes,
+                self.gpu_chunk_sizes_in_bytes,
+            )
         elif transfer_op.transfer_type == TransferType.H2D:
             _trace_cpu_block_fingerprints(
                 "H2D_CPU",
@@ -1580,6 +1663,17 @@ class tpGPUCPUTransferWorker(TransferWorkerBase):
                 src_block_ids,
                 self.cpu_block_stride_in_bytes,
                 peer_block_ids=dst_block_ids,
+            )
+            _trace_tp_gpu_cpu_fingerprints(
+                "H2D_ENDPOINT",
+                self.gpu_blocks,
+                dst_block_ids,
+                self.cpu_tensor,
+                src_block_ids,
+                self.cpu_block_stride_in_bytes,
+                self.cpu_tp_stride_in_bytes,
+                self.gpu_block_strides_in_bytes,
+                self.gpu_chunk_sizes_in_bytes,
             )
         return True
 
