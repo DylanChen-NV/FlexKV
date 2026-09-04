@@ -96,6 +96,8 @@ def _trace_tp_gpu_cpu_fingerprints(
     cpu_tp_stride_in_bytes: int,
     gpu_block_strides_in_bytes: List[int],
     gpu_chunk_sizes_in_bytes: List[int],
+    num_layers: int,
+    kv_dim: int,
 ) -> None:
     """Sample TP-rank GPU blocks and compare them with their CPU slices."""
     if os.environ.get("FLEXKV_TRACE_BLOCK_FINGERPRINT", "0") != "1":
@@ -135,7 +137,19 @@ def _trace_tp_gpu_cpu_fingerprints(
             )
             chunk_size = gpu_chunk_sizes_in_bytes[tp_rank]
             gpu_bytes = 0
-            for tensor in tensors:
+            # SGLang registers tensors as [all K layers, all V layers], while
+            # one CPU TP slice is laid out [layer 0 K/V, layer 1 K/V, ...].
+            # Reorder only that known representation; other backends retain
+            # their registered tensor order.
+            if len(tensors) == num_layers * kv_dim:
+                ordered_tensors = [
+                    tensors[kv_idx * num_layers + layer_idx]
+                    for layer_idx in range(num_layers)
+                    for kv_idx in range(kv_dim)
+                ]
+            else:
+                ordered_tensors = tensors
+            for tensor in ordered_tensors:
                 tensor_bytes = tensor.view(torch.uint8).reshape(-1)
                 chunk = tensor_bytes[
                     gpu_block_start : gpu_block_start + chunk_size
@@ -1655,6 +1669,8 @@ class tpGPUCPUTransferWorker(TransferWorkerBase):
                 self.cpu_tp_stride_in_bytes,
                 self.gpu_block_strides_in_bytes,
                 self.gpu_chunk_sizes_in_bytes,
+                self.num_layers,
+                self.kv_dim,
             )
         elif transfer_op.transfer_type == TransferType.H2D:
             _trace_cpu_block_fingerprints(
@@ -1674,6 +1690,8 @@ class tpGPUCPUTransferWorker(TransferWorkerBase):
                 self.cpu_tp_stride_in_bytes,
                 self.gpu_block_strides_in_bytes,
                 self.gpu_chunk_sizes_in_bytes,
+                self.num_layers,
+                self.kv_dim,
             )
         return True
 
