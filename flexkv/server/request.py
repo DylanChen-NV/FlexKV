@@ -118,6 +118,7 @@ class GetMatchRequest:
     # SWA-aware match: clamp the Full-KV transfer to the reusable SWA window; the
     # SWA window is the trailing block of the returned mask.
     swa_aware: bool = False
+    refresh_on_miss: bool = False
 
 
 

@@ -2,6 +2,7 @@
 #include "redis_meta_channel.h"
 
 #include <algorithm>
+#include <chrono>
 #include <pthread.h>
 #include <unistd.h>
 #include <queue>
@@ -96,10 +97,13 @@ void* DistributedRadixTree::refresh_worker_trampoline(void* arg) {
 }
 
 bool DistributedRadixTree::start(RedisMetaChannel *ch) {
+  std::lock_guard<std::mutex> lock(refresh_mutex);
   if (refresh_started) return true;
   channel = ch;
   refresh_should_stop.store(false, std::memory_order_release);
   refresh_started = true;
+  ++refresh_epoch;
+  completed_refresh = requested_refresh;
   int result = pthread_create(&refresh_tid, nullptr, &DistributedRadixTree::refresh_worker_trampoline, this);
   if (result != 0) {
     std::cerr << "[ERROR] DistributedRadixTree::start: pthread_create failed with result=" << result << std::endl;
@@ -110,10 +114,30 @@ bool DistributedRadixTree::start(RedisMetaChannel *ch) {
 }
 
 void DistributedRadixTree::stop() {
-  if (!refresh_started) return;
-  refresh_should_stop.store(true, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(refresh_mutex);
+    if (!refresh_started) return;
+    refresh_should_stop.store(true, std::memory_order_release);
+    ++refresh_epoch;
+  }
+  refresh_cv.notify_all();
   pthread_join(refresh_tid, nullptr);
+  std::lock_guard<std::mutex> lock(refresh_mutex);
   refresh_started = false;
+}
+
+bool DistributedRadixTree::refresh(uint32_t timeout_ms) {
+  std::unique_lock<std::mutex> lock(refresh_mutex);
+  if (!refresh_started || refresh_should_stop.load(std::memory_order_acquire)) return false;
+  const uint64_t epoch = refresh_epoch;
+  const uint64_t request = ++requested_refresh;
+  refresh_cv.notify_all();
+  const bool ready = refresh_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
+    return completed_refresh >= request || refresh_epoch != epoch ||
+           refresh_should_stop.load(std::memory_order_acquire);
+  });
+  return ready && refresh_epoch == epoch && successful_refresh >= request &&
+         !refresh_should_stop.load(std::memory_order_acquire);
 }
 
 void DistributedRadixTree::refresh_worker() {
@@ -151,7 +175,14 @@ void DistributedRadixTree::refresh_worker() {
     uint64_t now_ms = (uint64_t)tv_now.tv_sec * 1000 + (uint64_t)(tv_now.tv_usec / 1000);
     uint64_t time_since_last = now_ms - last_rebuild_ms;
     
-    if (time_since_last >= rebuild_interval_ms) {
+    uint64_t refresh_ticket;
+    bool refresh_requested;
+    {
+      std::lock_guard<std::mutex> lock(refresh_mutex);
+      refresh_ticket = requested_refresh;
+      refresh_requested = refresh_ticket > completed_refresh;
+    }
+    if (refresh_requested || time_since_last >= rebuild_interval_ms) {
       RefRadixTree* new_idx = nullptr;
       try {
         new_idx = remote_tree_refresh();
@@ -192,13 +223,27 @@ void DistributedRadixTree::refresh_worker() {
           }
           old_idx2->dec_ref_cnt();
         }
+        // Only acknowledge requests received BEFORE this rebuild began.
+        {
+          std::lock_guard<std::mutex> lock(refresh_mutex);
+          successful_refresh = refresh_ticket;
+        }
       }
+      {
+        std::lock_guard<std::mutex> lock(refresh_mutex);
+        completed_refresh = refresh_ticket;
+      }
+      refresh_cv.notify_all();
       last_rebuild_ms = now_ms;
     }
 
     // Sleep if no work
     if (batch.empty()) {
-      usleep(1000 * idle_sleep_ms_);
+      std::unique_lock<std::mutex> lock(refresh_mutex);
+      refresh_cv.wait_for(lock, std::chrono::milliseconds(idle_sleep_ms_), [&] {
+        return refresh_should_stop.load(std::memory_order_acquire) ||
+               requested_refresh > completed_refresh;
+      });
     }
   }
 }
@@ -1031,4 +1076,3 @@ void attach_and_merge_root_child(CRadixTreeIndex* temp_tree, CRadixNode* root_ch
 }
 
 } // namespace flexkv
-

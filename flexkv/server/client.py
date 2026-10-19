@@ -230,6 +230,7 @@ class KVDPClient:
         cpu_only: bool = False,
         namespace: Optional[List[str]] = None,
         swa_aware: bool = False,
+        refresh_on_miss: bool = False,
     ) -> Optional[Tuple[int, np.ndarray]]:
         req = GetMatchRequest(
             dp_client_id=self.dp_client_id,
@@ -239,6 +240,7 @@ class KVDPClient:
             task_id=self._get_task_id(),
             namespace=namespace,
             swa_aware=swa_aware,
+            refresh_on_miss=refresh_on_miss,
         )
         self.send_to_server.send_pyobj(req)
         response: Response = self.recv_from_server.recv_pyobj()

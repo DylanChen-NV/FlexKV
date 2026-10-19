@@ -244,6 +244,7 @@ class KVManager:
                   cpu_only: bool = False,
                   namespace: Optional[List[str]] = None,
                   swa_aware: bool = False,
+                  refresh_on_miss: bool = False,
                   ) -> Tuple[int, np.ndarray]:
         """Match a prefix and build the load graph; return (task_id, mask).
 
@@ -251,6 +252,10 @@ class KVManager:
         (from the same single match); the SWA window is the trailing block of the
         returned mask, which the caller reads directly. ``swa_aware=False``
         (default) is the plain path.
+
+        ``refresh_on_miss=True`` is a one-shot orchestrator hint that a peer
+        checkpoint is ready. Refresh a stale P2P index once before planning;
+        ordinary requests keep the default False and perform no extra I/O.
         """
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.numpy()
@@ -261,7 +266,8 @@ class KVManager:
                                                      token_mask,
                                                      cpu_only=cpu_only,
                                                      namespace=namespace,
-                                                     swa_aware=swa_aware)
+                                                     swa_aware=swa_aware,
+                                                     refresh_on_miss=refresh_on_miss)
         else:
             task_id, mask = self.kv_task_engine.get_match(
                 token_ids=token_ids,
@@ -270,6 +276,7 @@ class KVManager:
                 dp_client_id=self.dp_client_id,
                 namespace=namespace,
                 swa_aware=swa_aware,
+                refresh_on_miss=refresh_on_miss,
             )
         return task_id, mask
 

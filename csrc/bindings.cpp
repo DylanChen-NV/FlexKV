@@ -1256,6 +1256,9 @@ PYBIND11_MODULE(c_ext, m) {
       .def("remote_tree_refresh",
            &flexkv::DistributedRadixTree::remote_tree_refresh,
            py::return_value_policy::reference)
+      .def("refresh", &flexkv::DistributedRadixTree::refresh,
+           py::arg("timeout_ms") = 5000,
+           py::call_guard<py::gil_scoped_release>())
       .def("match_prefix", &flexkv::DistributedRadixTree::match_prefix,
            py::arg("block_hashes"), py::arg("num_blocks"),
            py::arg("update_cache_info") = true,
