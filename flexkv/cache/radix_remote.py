@@ -89,6 +89,10 @@ class DistributedRadixTree:
     def match_prefix(self, block_hashes: torch.Tensor, num_blocks: int, update_cache_info: bool = True):
         return self._c.match_prefix(block_hashes, int(num_blocks), bool(update_cache_info))
 
+    def refresh(self, timeout_ms: int = 5000) -> bool:
+        """Ask the Redis-owning worker to rebuild and install a fresh index."""
+        return bool(self._c.refresh(int(timeout_ms)))
+
     def lock(self, node: "CRadixNode") -> None:
         self._c.lock(node)
 

@@ -3568,6 +3568,38 @@ class GlobalCacheEngine:
 
         return cpu_matched_result, ssd_matched_result, remote_matched_result
 
+    @_synchronized_cache_tree
+    def refresh_remote_if_needed(self, token_ids, token_mask, namespace=None) -> None:
+        """One bounded index refresh for an orchestrator-confirmed KV retry.
+
+        An ordinary cold miss never enters this path. The worker remains the
+        only reader of its hiredis connection; a timeout falls back to matching.
+        """
+        engine = self.cpu_cache_engine
+        if not isinstance(engine, HierarchyLRCacheEngine):
+            return
+        window = self._prepare_request(
+            token_ids, token_mask.copy(), np.zeros(int(token_mask.sum()), dtype=np.int64), namespace
+        )
+        if window.block_end_idx == 0:
+            return
+        meta = window.sequence_meta
+        meta.gen_hashes()
+        hashes = torch.from_numpy(meta.block_hashes).to(torch.int64)
+        before = max(
+            int(index.match_prefix(hashes, meta.num_blocks, False).num_matched_blocks)
+            for index in (engine.local_index, engine.remote_index)
+        )
+        if before >= window.block_end_idx:
+            return
+        start = time.monotonic()
+        ready = engine.remote_index.refresh()
+        after = int(engine.remote_index.match_prefix(hashes, meta.num_blocks, False).num_matched_blocks)
+        flexkv_logger.info(
+            "KV_REFRESH_ON_MISS required=%s before=%s remote_after=%s ready=%s wait_ms=%.3f",
+            window.block_end_idx, before, after, ready, (time.monotonic() - start) * 1000,
+        )
+
     def _prepare_request(self,
                          token_ids: np.ndarray,
                          token_mask: np.ndarray,

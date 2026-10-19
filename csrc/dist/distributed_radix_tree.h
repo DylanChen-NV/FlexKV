@@ -5,6 +5,8 @@
 #include <atomic>
 #include <iostream>
 #include <shared_mutex>
+#include <condition_variable>
+#include <mutex>
 #include <torch/extension.h>
 #include <pthread.h>
 
@@ -119,6 +121,12 @@ private:
   // Mutex to protect index access during refresh
   // shared_lock for readers (match_prefix), unique_lock for writers (refresh_worker)
   mutable std::shared_mutex index_mutex;
+  std::mutex refresh_mutex;
+  std::condition_variable refresh_cv;
+  uint64_t requested_refresh = 0;
+  uint64_t completed_refresh = 0;
+  uint64_t successful_refresh = 0;
+  uint64_t refresh_epoch = 0;
   void refresh_worker();
   static void* refresh_worker_trampoline(void* arg);
   void refresh_nodes_lease_from_redis(const std::vector<CRadixNode*> &batch);
@@ -139,6 +147,7 @@ public:
   bool start(RedisMetaChannel *channel);
   void stop();
   void reset();
+  bool refresh(uint32_t timeout_ms = 5000);
   RefRadixTree* remote_tree_refresh();
   std::shared_ptr<CMatchResult> match_prefix(torch::Tensor &block_hashes,
     int num_blocks, bool update_cache_info = true);
@@ -149,4 +158,3 @@ public:
 };
 
 } // namespace flexkv
-
