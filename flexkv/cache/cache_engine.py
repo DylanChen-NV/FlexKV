@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import os
 import threading
 import time
 from functools import partial, wraps
@@ -3569,7 +3570,7 @@ class GlobalCacheEngine:
         return cpu_matched_result, ssd_matched_result, remote_matched_result
 
     @_synchronized_cache_tree
-    def refresh_remote_if_needed(self, token_ids, token_mask, namespace=None) -> None:
+    def refresh_remote_if_needed(self, token_ids, token_mask, namespace=None, *, refresh_cohort=None) -> None:
         """One bounded index refresh for an orchestrator-confirmed KV retry.
 
         An ordinary cold miss never enters this path. The worker remains the
@@ -3592,12 +3593,32 @@ class GlobalCacheEngine:
         )
         if before >= window.block_end_idx:
             return
+        # Reuse only a successful snapshot taken after this source checkpoint.
+        # Reset/restart, another policy or another checkpoint needs a fresh one.
+        key = None
+        if (os.getenv("FLEXKV_REFRESH_COALESCE", "1") == "1"
+                and isinstance(refresh_cohort, str) and 0 < len(refresh_cohort) <= 128):
+            key = (id(engine.remote_index), engine.remote_index.refresh_epoch,
+                   tuple(namespace or ()), refresh_cohort)
+            cohorts = getattr(self, "_retry_refresh_cohorts", None)
+            if cohorts is None:
+                self._retry_refresh_cohorts = cohorts = {}
+            if key in cohorts:
+                flexkv_logger.info(
+                    "KV_REFRESH_DECISION reason=coalesced required=%s before=%s cohort=%s",
+                    window.block_end_idx, before, refresh_cohort,
+                )
+                return
         start = time.monotonic()
         ready = engine.remote_index.refresh()
+        if ready and key is not None:
+            cohorts[key] = True
+            while len(cohorts) > 256:
+                del cohorts[next(iter(cohorts))]
         after = int(engine.remote_index.match_prefix(hashes, meta.num_blocks, False).num_matched_blocks)
         flexkv_logger.info(
-            "KV_REFRESH_ON_MISS required=%s before=%s remote_after=%s ready=%s wait_ms=%.3f",
-            window.block_end_idx, before, after, ready, (time.monotonic() - start) * 1000,
+            "KV_REFRESH_ON_MISS required=%s before=%s remote_after=%s ready=%s wait_ms=%.3f cohort=%s",
+            window.block_end_idx, before, after, ready, (time.monotonic() - start) * 1000, refresh_cohort,
         )
 
     def _prepare_request(self,

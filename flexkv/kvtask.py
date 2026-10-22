@@ -1492,7 +1492,8 @@ class KVTaskEngine(KVTaskManager):
                   task_id: int = -1,
                   namespace: Optional[List[str]] = None,
                   swa_aware: bool = False,
-                  refresh_on_miss: bool = False) -> Tuple[int, np.ndarray]:
+                  refresh_on_miss: bool = False,
+                  refresh_cohort: Optional[str] = None) -> Tuple[int, np.ndarray]:
         """Match a prefix and build the load graph; return (task_id, return_mask).
 
         With ``swa_aware=True`` the Full-KV transfer is clamped to the reusable
@@ -1514,7 +1515,9 @@ class KVTaskEngine(KVTaskManager):
             token_mask = np.ones_like(token_ids, dtype=bool)
         fake_slot_mapping = np.zeros_like(token_ids[token_mask])
         if refresh_on_miss and isinstance(self.cache_engine, GlobalCacheEngine):
-            self.cache_engine.refresh_remote_if_needed(token_ids, token_mask, namespace)
+            self.cache_engine.refresh_remote_if_needed(
+                token_ids, token_mask, namespace, refresh_cohort=refresh_cohort
+            )
         result_task_id, return_mask = self._get_match_impl(token_ids,
                                                            fake_slot_mapping,
                                                            is_fake_slot_mapping=True,

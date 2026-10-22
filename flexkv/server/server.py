@@ -446,6 +446,7 @@ class KVServer:
             namespace=req.namespace,
             swa_aware=req.swa_aware,
             refresh_on_miss=req.refresh_on_miss,
+            refresh_cohort=getattr(req, "refresh_cohort", None),
         )
         response = Response(dp_client_id=req.dp_client_id,
                             task_id=req_id, mask=mask)

@@ -245,6 +245,7 @@ class KVManager:
                   namespace: Optional[List[str]] = None,
                   swa_aware: bool = False,
                   refresh_on_miss: bool = False,
+                  refresh_cohort: Optional[str] = None,
                   ) -> Tuple[int, np.ndarray]:
         """Match a prefix and build the load graph; return (task_id, mask).
 
@@ -267,7 +268,8 @@ class KVManager:
                                                      cpu_only=cpu_only,
                                                      namespace=namespace,
                                                      swa_aware=swa_aware,
-                                                     refresh_on_miss=refresh_on_miss)
+                                                     refresh_on_miss=refresh_on_miss,
+                                                     refresh_cohort=refresh_cohort)
         else:
             task_id, mask = self.kv_task_engine.get_match(
                 token_ids=token_ids,
@@ -277,6 +279,7 @@ class KVManager:
                 namespace=namespace,
                 swa_aware=swa_aware,
                 refresh_on_miss=refresh_on_miss,
+                refresh_cohort=refresh_cohort,
             )
         return task_id, mask
 

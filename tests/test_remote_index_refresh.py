@@ -119,6 +119,76 @@ def test_non_p2p_engine_does_not_refresh():
     engine.refresh_remote_if_needed(np.arange(8), np.ones(8, dtype=bool))
 
 
+def _retry_engine():
+    engine = GlobalCacheEngine.__new__(GlobalCacheEngine)
+    engine._cache_tree_lock = threading.RLock()
+    tier = HierarchyLRCacheEngine.__new__(HierarchyLRCacheEngine)
+    tier.local_index = Mock()
+    tier.remote_index = Mock()
+    tier.remote_index.refresh_epoch = 0
+    for index in (tier.local_index, tier.remote_index):
+        index.match_prefix.return_value = SimpleNamespace(num_matched_blocks=0)
+    tier.remote_index.refresh.return_value = True
+    engine.cpu_cache_engine = tier
+    meta = SimpleNamespace(gen_hashes=lambda: None, block_hashes=np.array([7, 11]), num_blocks=2)
+    engine._prepare_request = Mock(return_value=SimpleNamespace(block_end_idx=2, sequence_meta=meta))
+    return engine, tier.remote_index
+
+
+def test_cohort_reuses_only_successful_same_epoch_acknowledgements(monkeypatch):
+    monkeypatch.delenv("FLEXKV_REFRESH_COALESCE", raising=False)
+    engine, remote = _retry_engine()
+
+    def retry(cohort="checkpoint-1", namespace=None):
+        engine.refresh_remote_if_needed(np.arange(8), np.ones(8, dtype=bool), namespace,
+                                        refresh_cohort=cohort)
+
+    retry()
+    retry()
+    assert remote.refresh.call_count == 1
+    remote.refresh_epoch += 1
+    retry()
+    retry("checkpoint-2")
+    retry(namespace=["new-policy"])
+    assert remote.refresh.call_count == 4
+    remote.refresh.return_value = False
+    retry("failed")
+    retry("failed")
+    assert remote.refresh.call_count == 6
+
+
+@pytest.mark.parametrize("cohort", [None, "", 1, "x" * 129])
+def test_missing_or_invalid_cohort_preserves_legacy_refresh(cohort):
+    engine, remote = _retry_engine()
+    for _ in range(2):
+        engine.refresh_remote_if_needed(np.arange(8), np.ones(8, dtype=bool), refresh_cohort=cohort)
+    assert remote.refresh.call_count == 2
+
+
+def test_debug_disable_preserves_legacy_refresh(monkeypatch):
+    monkeypatch.setenv("FLEXKV_REFRESH_COALESCE", "0")
+    engine, remote = _retry_engine()
+    for _ in range(2):
+        engine.refresh_remote_if_needed(np.arange(8), np.ones(8, dtype=bool), refresh_cohort="checkpoint-1")
+    assert remote.refresh.call_count == 2
+
+
+def test_concurrent_cohort_refreshes_once():
+    engine, remote = _retry_engine()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(lambda _: engine.refresh_remote_if_needed(
+            np.arange(8), np.ones(8, dtype=bool), refresh_cohort="checkpoint-1"), range(32)))
+    assert remote.refresh.call_count == 1
+
+
+def test_cohort_history_is_bounded():
+    engine, remote = _retry_engine()
+    for checkpoint in range(300):
+        engine.refresh_remote_if_needed(np.arange(8), np.ones(8, dtype=bool), refresh_cohort=str(checkpoint))
+    assert len(engine._retry_refresh_cohorts) == 256
+    assert remote.refresh.call_count == 300
+
+
 def test_partial_index_can_refresh_to_full_and_timeout_is_bounded(redis_port):
     channel = RedisMetaChannel("127.0.0.1", redis_port, 2, "127.0.0.2", "CPUB")
     publisher = RedisMetaChannel("127.0.0.1", redis_port, 1, "127.0.0.1", "CPUB")

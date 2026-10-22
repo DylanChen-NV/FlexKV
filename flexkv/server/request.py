@@ -119,6 +119,7 @@ class GetMatchRequest:
     # SWA window is the trailing block of the returned mask.
     swa_aware: bool = False
     refresh_on_miss: bool = False
+    refresh_cohort: Optional[str] = None
 
 
 

@@ -35,6 +35,7 @@ class DistributedRadixTree:
         self._c = _CDistributedRadixTree(int(tokens_per_block), int(max_num_blocks), int(node_id),
                                          int(refresh_batch_size), int(rebuild_interval_ms), int(idle_sleep_ms), int(lease_renew_ms), int(hit_reward_seconds))
         self._started = False
+        self.refresh_epoch = 0
 
     def __del__(self) -> None:
         """destructor, ensure stop method is called when object is destroyed"""
@@ -67,6 +68,7 @@ class DistributedRadixTree:
     def stop(self) -> None:
         self._c.stop()
         self._started = False
+        self.refresh_epoch += 1
 
     @property
     def started(self) -> bool:
@@ -74,6 +76,7 @@ class DistributedRadixTree:
 
     def reset(self) -> None:
         self._c.reset()
+        self.refresh_epoch += 1
 
     def remote_tree_refresh(self) -> Optional["RefRadixTree"]:
         """Refresh the remote tree by loading block metadata from Redis.
