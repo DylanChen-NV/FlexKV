@@ -6,6 +6,7 @@ from flexkv.common.config import MooncakeTransferEngineConfig
 from flexkv.transfer.utils import RDMATaskInfo
 from flexkv.transfer.zmqHelper import NotifyMsg, NotifyStatus
 from typing import List
+from flexkv.rdma_regions import split_read_regions
 
 # Lazy import: engine module is only imported when MoonCakeTransferEngineWrapper is actually instantiated
 # This allows FlexKV to work without mooncake engine installed if distributed shared memory is not needed
@@ -44,6 +45,11 @@ class MoonCakeTransferEngineWrapper:
         self.engine_port = self.config.engine_port
         self.mooncake_addr = f"{self.engine_ip}:{self.engine_port}"
         flexkv_logger.info(f"Mooncake listen on: {self.mooncake_addr}")
+        self.cpu_read_region_bytes = int(os.environ.get("FLEXKV_CPU_RDMA_REGION_BYTES", "0"))
+        if self.cpu_read_region_bytes < 0:
+            raise ValueError("FLEXKV_CPU_RDMA_REGION_BYTES must be nonnegative")
+        if self.cpu_read_region_bytes:
+            flexkv_logger.info(f"CPU_RDMA_READ_REGION_BYTES={self.cpu_read_region_bytes}")
 
         supported_backend = ["redis", "http"]
         self.metadata_backend = self.config.metadata_backend.lower()
@@ -95,6 +101,10 @@ class MoonCakeTransferEngineWrapper:
         return ret if ret == 0 else -1
     
     def batch_transfer_sync_read(self, peer_engine_addr: str, src_ptr_list: List[int], dst_ptr_list: List[int], data_size_list: List[int])-> int:
+        # This wrapper transfers registered CPU pools; GPU H2D/D2H use separate workers.
+        src_ptr_list, dst_ptr_list, data_size_list = split_read_regions(
+            src_ptr_list, dst_ptr_list, data_size_list, self.cpu_read_region_bytes
+        )
         ret = self.engine.batch_transfer_sync_read(peer_engine_addr, dst_ptr_list, src_ptr_list, data_size_list)
         return ret if ret == 0 else -1
     
