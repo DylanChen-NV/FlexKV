@@ -19,6 +19,7 @@ import time
 import multiprocessing as mp
 import selectors
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import contextlib
@@ -1586,16 +1587,27 @@ class TransferEngine:
                 f"old={set(self.gpu_handle_groups)}, "
                 f"new={set(gpu_handle_groups)}"
             )
-        imported = 0
-        for worker_key, handles in gpu_handle_groups.items():
-            # Always the plural shape now: one worker class, one payload shape,
-            # for every TP width.
-            payload = [handle.get_tensor_handle_list() for handle in handles]
-            imported += int(
-                self.h2d_workers[worker_key].control("resume_gpu", payload)
-            )
-            imported += int(
-                self.d2h_workers[worker_key].control("resume_gpu", payload)
+        def requests():
+            for worker_key, handles in gpu_handle_groups.items():
+                payload = [handle.get_tensor_handle_list() for handle in handles]
+                yield self.h2d_workers[worker_key], payload
+                yield self.d2h_workers[worker_key], payload
+
+        enabled = os.environ.get("FLEXKV_PARALLEL_GPU_REMAP") == "1"
+        operations = list(requests()) if enabled else requests()
+        parallel = enabled and bool(operations) and len({id(w) for w, _ in operations}) == len(operations)
+        start = time.perf_counter()
+        # A pipe must have only one control reader; aliases retain serial ordering.
+        if parallel:
+            with ThreadPoolExecutor(max_workers=min(8, len(operations))) as pool:
+                pending = [pool.submit(worker.control, "resume_gpu", payload) for worker, payload in operations]
+                imported = sum(int(future.result()) for future in pending)
+        else:
+            imported = sum(int(worker.control("resume_gpu", payload)) for worker, payload in operations)
+        if "FLEXKV_PARALLEL_GPU_REMAP" in os.environ:
+            flexkv_logger.info(
+                f"GPU_REMAP_PROFILE parallel={parallel} controls={2 * len(gpu_handle_groups)} imported={imported} "
+                f"seconds={time.perf_counter() - start:.6f}"
             )
         self.gpu_handle_groups = gpu_handle_groups
         self._gpu_mappings_suspended = False
